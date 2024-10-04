@@ -1,6 +1,5 @@
 <!--
-//
-// Copyright © 2022, 2023 Hardcore Engineering Inc.
+// Copyright © 2024 Hardcore Engineering Inc.
 //
 // Licensed under the Eclipse Public License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License. You may
@@ -12,22 +11,16 @@
 //
 // See the License for the specific language governing permissions and
 // limitations under the License.
-//
 -->
 <script lang="ts">
-  import { WithLookup } from '@hcengineering/core'
-  import { Document } from '@hcengineering/document'
-  import document from '../plugin'
-  import DocumentIcon from './DocumentIcon.svelte'
+  import { markupToJSON } from '@hcengineering/text'
+  import LiteNode from './markup/lite/LiteNode.svelte'
 
-  export let value: WithLookup<Document>
+  export let message: string
+
+  $: node = markupToJSON(message)
 </script>
 
-<div class="flex-row-center">
-  <div class="flex-center p-1 content-dark-color flex-no-shrink mr-2-5">
-    <DocumentIcon {value} size={'medium'} defaultIcon={document.icon.Document} />
-  </div>
-  <span class="overflow-label">
-    {value.title}
-  </span>
+<div class="text-markup-view">
+  <LiteNode {node} />
 </div>
