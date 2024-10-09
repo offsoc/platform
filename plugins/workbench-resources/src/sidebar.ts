@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
-import { type Widget, type WidgetTab } from '@hcengineering/workbench'
+import { WorkbenchEvents, type Widget, type WidgetTab } from '@hcengineering/workbench'
 import { getCurrentAccount, type Ref } from '@hcengineering/core'
 import { get, writable } from 'svelte/store'
 import { getCurrentLocation } from '@hcengineering/ui'
@@ -32,6 +32,7 @@ export interface WidgetState {
   tabs: WidgetTab[]
   tab?: string
   closedByUser?: boolean
+  openedByUser?: boolean
 }
 
 export interface SidebarState {
@@ -97,19 +98,26 @@ function setSidebarStateToLocalStorage (state: SidebarState): void {
   )
 }
 
-export function openWidget (widget: Widget, data?: Record<string, any>, active = true): void {
+export function openWidget (
+  widget: Widget,
+  data?: Record<string, any>,
+  params?: { active: boolean, openedByUser: boolean }
+): void {
   const state = get(sidebarStore)
   const { widgetsState } = state
   const widgetState = widgetsState.get(widget._id)
+  const active = params?.active ?? true
+  const openedByUser = params?.openedByUser ?? false
 
   widgetsState.set(widget._id, {
     _id: widget._id,
     data: data ?? widgetState?.data,
     tab: widgetState?.tab,
-    tabs: widgetState?.tabs ?? []
+    tabs: widgetState?.tabs ?? [],
+    openedByUser
   })
 
-  Analytics.handleEvent('workbench.OpenSidebarWidget', { widget: widget._id })
+  Analytics.handleEvent(WorkbenchEvents.SidebarOpenWidget, { widget: widget._id })
   sidebarStore.set({
     ...state,
     widgetsState,
@@ -127,7 +135,7 @@ export function closeWidget (widget: Ref<Widget>): void {
   }
 
   widgetsState.delete(widget)
-  Analytics.handleEvent('workbench.CloseSidebarWidget', { widget })
+  Analytics.handleEvent(WorkbenchEvents.SidebarCloseWidget, { widget })
   if (state.widget === widget) {
     sidebarStore.set({
       ...state,
@@ -154,7 +162,7 @@ export async function closeWidgetTab (widget: Widget, tab: string): Promise<void
   const newTabs = tabs.filter((it) => it.id !== tab)
   const closedTab = tabs.find((it) => it.id === tab)
 
-  Analytics.handleEvent('workbench.CloseSidebarWidget', { widget: widget._id, tab })
+  Analytics.handleEvent(WorkbenchEvents.SidebarCloseWidget, { widget: widget._id, tab: closedTab?.name })
 
   if (widget.onTabClose !== undefined && closedTab !== undefined) {
     const fn = await getResource(widget.onTabClose)
@@ -200,7 +208,7 @@ export function openWidgetTab (widget: Ref<Widget>, tab: string): void {
   if (newTab === undefined) return
 
   widgetsState.set(widget, { ...widgetState, tab })
-  Analytics.handleEvent('workbench.OpenSidebarWidget', { widget, tab })
+  Analytics.handleEvent(WorkbenchEvents.SidebarOpenWidget, { widget, tab: newTab?.name })
   sidebarStore.set({
     ...state,
     widgetsState
@@ -235,7 +243,7 @@ export function createWidgetTab (widget: Widget, tab: WidgetTab, newTab = false)
     tab: tab.id
   })
 
-  Analytics.handleEvent('workbench.OpenSidebarWidget', { widget: widget._id, tab: tab.id })
+  Analytics.handleEvent(WorkbenchEvents.SidebarOpenWidget, { widget: widget._id, tab: tab.name })
   sidebarStore.set({
     ...state,
     widget: widget._id,

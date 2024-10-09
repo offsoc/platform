@@ -14,9 +14,9 @@
 //
 
 import { type Attachment } from '@hcengineering/attachment'
-import { type Blob, type MeasureContext, type WorkspaceId, RateLimiter } from '@hcengineering/core'
+import { type Blob, type MeasureContext, type Ref, type WorkspaceId, RateLimiter } from '@hcengineering/core'
 import { DOMAIN_ATTACHMENT } from '@hcengineering/model-attachment'
-import { type StorageAdapter, type StorageAdapterEx } from '@hcengineering/server-core'
+import { type ListBlobResult, type StorageAdapter, type StorageAdapterEx } from '@hcengineering/server-core'
 import { type Db } from 'mongodb'
 import { PassThrough } from 'stream'
 
@@ -32,7 +32,7 @@ export async function syncFiles (
 ): Promise<void> {
   if (exAdapter.adapters === undefined) return
 
-  for (const [name, adapter] of exAdapter.adapters.entries()) {
+  for (const [name, adapter] of [...exAdapter.adapters.entries()].reverse()) {
     await adapter.make(ctx, workspaceId)
 
     await retryOnFailure(ctx, 5, async () => {
@@ -47,7 +47,12 @@ export async function syncFiles (
 
           for (const data of dataBulk) {
             const blob = await exAdapter.stat(ctx, workspaceId, data._id)
-            if (blob !== undefined) continue
+            if (blob !== undefined) {
+              if (blob.provider !== name && name === exAdapter.defaultAdapter) {
+                await exAdapter.syncBlobFromStorage(ctx, workspaceId, data._id, exAdapter.defaultAdapter)
+              }
+              continue
+            }
 
             await exAdapter.syncBlobFromStorage(ctx, workspaceId, data._id, name)
 
@@ -143,6 +148,20 @@ async function processAdapter (
 
   const iterator = await source.listStream(ctx, workspaceId)
 
+  const targetIterator = await target.listStream(ctx, workspaceId)
+
+  const targetBlobs = new Map<Ref<Blob>, ListBlobResult>()
+
+  while (true) {
+    const part = await targetIterator.next()
+    for (const p of part) {
+      targetBlobs.set(p._id, p)
+    }
+    if (part.length === 0) {
+      break
+    }
+  }
+
   const toRemove: string[] = []
   try {
     while (true) {
@@ -150,54 +169,55 @@ async function processAdapter (
       if (dataBulk.length === 0) break
 
       for (const data of dataBulk) {
-        let targetBlob = await target.stat(ctx, workspaceId, data._id)
-        const sourceBlob = await source.stat(ctx, workspaceId, data._id)
-
-        if (sourceBlob === undefined) {
-          console.error('blob not found', data._id)
-          continue
-        }
+        let targetBlob: Blob | ListBlobResult | undefined = targetBlobs.get(data._id)
         if (targetBlob !== undefined) {
-          console.log('Target blob already exists', targetBlob._id, targetBlob.contentType)
+          console.log('Target blob already exists', targetBlob._id)
+
+          const aggrBlob = await exAdapter.stat(ctx, workspaceId, data._id)
+          if (aggrBlob === undefined || aggrBlob?.provider !== targetBlob.provider) {
+            targetBlob = await exAdapter.syncBlobFromStorage(ctx, workspaceId, targetBlob._id, exAdapter.defaultAdapter)
+          }
+          if (targetBlob.size === data.size) {
+            // We could safely delete source blob
+            toRemove.push(data._id)
+          }
         }
 
         if (targetBlob === undefined) {
-          await rateLimiter.exec(async () => {
+          const sourceBlob = await source.stat(ctx, workspaceId, data._id)
+
+          if (sourceBlob === undefined) {
+            console.error('blob not found', data._id)
+            continue
+          }
+          targetBlob = await rateLimiter.exec(async () => {
             try {
-              await retryOnFailure(
+              const result = await retryOnFailure(
                 ctx,
                 5,
                 async () => {
                   await processFile(ctx, source, target, workspaceId, sourceBlob)
                   // We need to sync and update aggregator table for now.
-                  await exAdapter.syncBlobFromStorage(ctx, workspaceId, sourceBlob._id, exAdapter.defaultAdapter)
+                  return await exAdapter.syncBlobFromStorage(ctx, workspaceId, sourceBlob._id, exAdapter.defaultAdapter)
                 },
                 50
               )
               movedCnt += 1
               movedBytes += sourceBlob.size
               batchBytes += sourceBlob.size
+              return result
             } catch (err) {
               console.error('failed to process blob', data._id, err)
             }
           })
-        }
 
-        if (targetBlob === undefined) {
-          targetBlob = await target.stat(ctx, workspaceId, data._id)
+          if (targetBlob !== undefined && targetBlob.size === sourceBlob.size) {
+            // We could safely delete source blob
+            toRemove.push(sourceBlob._id)
+          }
+          processedBytes += sourceBlob.size
         }
-
-        if (
-          targetBlob !== undefined &&
-          targetBlob.size === sourceBlob.size &&
-          targetBlob.contentType === sourceBlob.contentType
-        ) {
-          // We could safely delete source blob
-          toRemove.push(sourceBlob._id)
-        }
-
         processedCnt += 1
-        processedBytes += sourceBlob.size
 
         if (processedCnt % 100 === 0) {
           await rateLimiter.waitProcessing()
@@ -223,7 +243,10 @@ async function processAdapter (
 
     await rateLimiter.waitProcessing()
     if (toRemove.length > 0 && params.move) {
-      await source.remove(ctx, workspaceId, toRemove)
+      while (toRemove.length > 0) {
+        const part = toRemove.splice(0, 500)
+        await source.remove(ctx, workspaceId, part)
+      }
     }
   } finally {
     await iterator.close()
